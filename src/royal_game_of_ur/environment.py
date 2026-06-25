@@ -140,6 +140,7 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         pieces = self._player_1 if player == 1 else self._player_2
         opponent = self._player_2 if player == 1 else self._player_1
         legal: list[Move] = []
+        seen: set[tuple[int, int]] = set()
 
         for piece_index, start in enumerate(pieces):
             start = int(start)
@@ -153,6 +154,10 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
                 continue
             if self._is_occupied_by_opponent(end, opponent):
                 continue
+            move_key = (start, end)
+            if move_key in seen:
+                continue
+            seen.add(move_key)
             legal.append({"start": start, "end": end})
 
         if not legal:

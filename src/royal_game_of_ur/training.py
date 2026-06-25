@@ -20,6 +20,7 @@ class TrainingResult:
     episode_rewards: list[float]
     wins: list[int]
     moving_average: list[float]
+    tracked_initial_values: dict[int, list[float]]
     q_table: dict[tuple[tuple[int, ...], tuple[int, ...], int], dict[tuple[int, int], float]]
 
 
@@ -39,6 +40,8 @@ def train_sarsa_lambda(
     episode_rewards: list[float] = []
     wins: list[int] = []
     moving_average: list[float] = []
+    tracked_initial_keys = _initial_state_action_keys(env)
+    tracked_initial_values: dict[int, list[float]] = {dice: [] for dice in tracked_initial_keys}
 
     progress = tqdm(range(episodes), desc="Training episodes", unit="episode")
     for episode in progress:
@@ -94,20 +97,25 @@ def train_sarsa_lambda(
             win_rate=f"{moving_average[-1]:.2f}",
         )
 
+        for dice_value, (state_key, action_key) in tracked_initial_keys.items():
+            tracked_initial_values[dice_value].append(_q_value(q_table, state_key, action_key))
+
     return TrainingResult(
         episode_rewards=episode_rewards,
         wins=wins,
         moving_average=moving_average,
+        tracked_initial_values=tracked_initial_values,
         q_table=q_table,
     )
 
 
-def plot_training_result(result: TrainingResult, output_dir: str | Path) -> tuple[Path, Path]:
+def plot_training_result(result: TrainingResult, output_dir: str | Path) -> tuple[Path, Path, Path]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     rewards_figure = output_path / "sarsa_lambda_rewards.png"
     performance_figure = output_path / "sarsa_lambda_win_rate.png"
+    initial_values_figure = output_path / "sarsa_lambda_initial_values.png"
 
     episodes = np.arange(1, len(result.episode_rewards) + 1)
     reward_array = np.asarray(result.episode_rewards, dtype=float)
@@ -138,7 +146,18 @@ def plot_training_result(result: TrainingResult, output_dir: str | Path) -> tupl
     fig.savefig(performance_figure, dpi=200)
     plt.close(fig)
 
-    return rewards_figure, performance_figure
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for dice_value, values in sorted(result.tracked_initial_values.items()):
+        ax.plot(episodes, values, linewidth=1.5, label=f"Initial dice {dice_value}")
+    ax.set_title("Tracked Q-value of the five initial state-action pairs")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Q(s, a)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(initial_values_figure, dpi=200)
+    plt.close(fig)
+
+    return rewards_figure, performance_figure, initial_values_figure
 
 
 def _state_key(observation: dict[str, np.ndarray]) -> tuple[tuple[int, ...], tuple[int, ...], int]:
@@ -147,6 +166,24 @@ def _state_key(observation: dict[str, np.ndarray]) -> tuple[tuple[int, ...], tup
         tuple(int(value) for value in observation["player_2"]),
         int(observation["dice"]),
     )
+
+
+def _initial_state_action_keys(
+    env: RoyalGameOfUrEnv,
+) -> dict[int, tuple[tuple[tuple[int, ...], tuple[int, ...], int], tuple[int, int]]]:
+    tracked_keys: dict[int, tuple[tuple[tuple[int, ...], tuple[int, ...], int], tuple[int, int]]] = {}
+    empty_player_state = tuple(0 for _ in range(env.config.pieces_per_player))
+    opponent_state = tuple(0 for _ in range(env.config.pieces_per_player))
+
+    for dice_value in range(5):
+        state_key = (empty_player_state, opponent_state, dice_value)
+        if dice_value == 0:
+            action_key = (0, 0)
+        else:
+            action_key = (0, dice_value)
+        tracked_keys[dice_value] = (state_key, action_key)
+
+    return tracked_keys
 
 
 def _action_dict(action: tuple[int, int]) -> Move:

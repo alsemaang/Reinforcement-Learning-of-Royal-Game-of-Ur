@@ -53,9 +53,10 @@ def main() -> int:
         lambda_=args.lambda_,
         seed=args.seed,
     )
-    rewards_figure, performance_figure = plot_training_result(result, args.output_dir)
+    rewards_figure, performance_figure, initial_values_figure = plot_training_result(result, args.output_dir)
 
     print(f"Finished {args.episodes} training episodes.")
     print(f"Saved reward plot to {rewards_figure}")
     print(f"Saved win-rate plot to {performance_figure}")
+    print(f"Saved initial-value plot to {initial_values_figure}")
     return 0
