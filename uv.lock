@@ -1,0 +1,3 @@
+# This file is a placeholder lockfile for uv.
+# Run `uv lock` locally to generate a real lockfile once dependencies are added.
+version = 1
