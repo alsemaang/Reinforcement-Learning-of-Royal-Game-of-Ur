@@ -1,3 +1,5 @@
 """Reinforcement Learning of the Royal Game of Ur."""
 
-__all__ = []
+from .environment import RoyalGameOfUrEnv, make_env
+
+__all__ = ["RoyalGameOfUrEnv", "make_env"]
