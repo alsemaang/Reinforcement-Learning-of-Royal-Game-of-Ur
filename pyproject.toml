@@ -4,9 +4,18 @@ version = "0.1.0"
 description = "Implement and apply the algorithms to the Royal Game of Ur."
 readme = "README.md"
 requires-python = ">=3.11"
-
 dependencies = []
 
 [build-system]
 requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/royal_game_of_ur"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/royal_game_of_ur",
+  "README.md",
+  "pyproject.toml",
+]
