@@ -205,6 +205,9 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         return end
 
     def _apply_move(self, player: int, move: Move) -> None:
+        if move == self._pass_action():
+            return
+
         pieces = self._player_1 if player == 1 else self._player_2
         opponent = self._player_2 if player == 1 else self._player_1
 
