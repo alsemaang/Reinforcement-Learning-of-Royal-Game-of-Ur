@@ -25,6 +25,11 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
 
     Player 1 is the learning agent. Player 2 acts randomly inside the
     environment until the next player 1 decision point.
+
+    The MDP transition is always between consecutive player-1 turns.
+    The reward r(s, a, s') equals 1 if s' is a terminal state in which
+    player 1 has won, and 0 otherwise.  Player 2 wins are also terminal
+    but yield reward 0, consistent with the episodic task definition.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 4}
@@ -75,6 +80,10 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         self._terminated = False
         self._winner: int | None = None
 
+    # ------------------------------------------------------------------
+    # Gymnasium API
+    # ------------------------------------------------------------------
+
     def reset(
         self,
         *,
@@ -88,53 +97,67 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         self._current_dice = self._roll_dice()
         self._terminated = False
         self._winner = None
-        self._advance_to_player_1_turn()
         return self._observation(), self._info()
 
     def step(
         self, action: Move
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Apply player 1's chosen move, then run player 2 until the next
+        player-1 decision point.  Returns the resulting observation together
+        with reward r(s, a, s') as defined in the MDP specification:
+          - reward = 1 if and only if s' is a terminal winning state for P1
+          - reward = 0 otherwise (including when P2 wins)
+        """
         if self._terminated:
             raise RuntimeError("step() called on a terminated environment")
-        if self._current_player != 1:
-            self._advance_to_player_1_turn()
 
         move = self._normalize_action(action)
         legal_actions = self.legal_actions(1)
-        real_legal_actions = [legal_action for legal_action in legal_actions if legal_action != self._pass_action()]
+        real_legal_actions = [m for m in legal_actions if m != self._pass_action()]
+
+        # --- validate and apply player 1's move ---
         if move == self._pass_action():
             if real_legal_actions:
-                raise ValueError(f"Illegal action {move}; legal actions are {legal_actions}")
-            self._current_player = 2
-            self._current_dice = self._roll_dice()
-            self._play_player_2_turns()
-            return self._observation(), 0.0, self._terminated, False, self._info()
-
-        if move not in legal_actions:
-            raise ValueError(f"Illegal action {move}; legal actions are {legal_actions}")
-
-        reward = 0.0
-        self._apply_move(1, move)
-
-        if self._has_won(1):
-            self._terminated = True
-            self._winner = 1
-            reward = 1.0
-        elif self._move_ended_on_rosette(move["end"]):
-            self._current_player = 1
-            self._current_dice = self._roll_dice()
+                raise ValueError(
+                    f"Illegal pass action; legal actions are {legal_actions}"
+                )
+            # Forced pass: hand the turn to player 2
         else:
-            self._current_player = 2
-            self._current_dice = self._roll_dice()
-            self._play_player_2_turns()
+            if move not in legal_actions:
+                raise ValueError(
+                    f"Illegal action {move}; legal actions are {legal_actions}"
+                )
+            self._apply_move(1, move)
 
-        return self._observation(), reward, self._terminated, False, self._info()
+            if self._has_won(1):
+                self._terminated = True
+                self._winner = 1
+                # r(s, a, s') = 1 for the winning transition
+                return self._observation(), 1.0, True, False, self._info()
+
+            if self._move_ended_on_rosette(move["end"]):
+                # Player 1 gets another turn; roll fresh dice and return
+                self._current_dice = self._roll_dice()
+                return self._observation(), 0.0, False, False, self._info()
+
+        # --- hand off to player 2 ---
+        self._current_player = 2
+        self._current_dice = self._roll_dice()
+        self._play_player_2_turns()
+
+        # After _play_player_2_turns the env is either terminated (P2 won)
+        # or back at a P1 decision point with fresh dice already rolled.
+        return self._observation(), 0.0, self._terminated, False, self._info()
 
     def render(self) -> None:
         print(self._render_text())
 
     def close(self) -> None:
         return None
+
+    # ------------------------------------------------------------------
+    # Action helpers
+    # ------------------------------------------------------------------
 
     def legal_actions(self, player: int) -> list[Move]:
         pieces = self._player_1 if player == 1 else self._player_2
@@ -166,10 +189,12 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
 
     def sample_action(self) -> Move:
         legal = self.legal_actions(1)
-        if not legal:
-            return {"start": START, "end": START}
         index = int(self.np_random.integers(0, len(legal)))
         return legal[index]
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _observation(self) -> dict[str, np.ndarray]:
         return {
@@ -203,7 +228,6 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
             return None
         if start == self.end_square:
             return None
-
         end = start + dice
         if end > self.end_square:
             return None
@@ -220,6 +244,9 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         if piece_index is None:
             raise ValueError(f"No piece at start square {move['start']}")
 
+        # Capture opponent piece if present on a non-safe square.
+        # Rosette squares are safe (opponent can't be captured there, already
+        # filtered in legal_actions).  Multiple pieces may share end_square.
         if move["end"] != self.end_square and move["end"] not in self.config.rosette_positions:
             opponent_piece = self._find_piece_at_position(opponent, move["end"])
             if opponent_piece is not None:
@@ -228,37 +255,33 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         pieces[piece_index] = move["end"]
 
     def _play_player_2_turns(self) -> None:
+        """Let player 2 take turns (including rosette bonuses) until it is
+        player 1's turn again or the game ends."""
         while not self._terminated and self._current_player == 2:
             legal_actions = self.legal_actions(2)
-            if not legal_actions:
-                self._current_player = 1
-                self._current_dice = self._roll_dice()
-                break
-
             action = legal_actions[int(self.np_random.integers(0, len(legal_actions)))]
+
             if action == self._pass_action():
+                # Player 2 forced to pass; hand back to player 1
                 self._current_player = 1
                 self._current_dice = self._roll_dice()
-                break
+                return
 
             self._apply_move(2, action)
 
             if self._has_won(2):
                 self._terminated = True
                 self._winner = 2
-                break
+                return
 
             if self._move_ended_on_rosette(action["end"]):
-                self._current_player = 2
+                # Player 2 gets another turn
                 self._current_dice = self._roll_dice()
             else:
+                # Back to player 1
                 self._current_player = 1
                 self._current_dice = self._roll_dice()
-                break
-
-    def _advance_to_player_1_turn(self) -> None:
-        while not self._terminated and self._current_player != 1:
-            self._play_player_2_turns()
+                return
 
     def _has_won(self, player: int) -> bool:
         pieces = self._player_1 if player == 1 else self._player_2
@@ -270,6 +293,10 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
     def _is_occupied_by_own_piece(
         self, destination: Position, pieces: np.ndarray, moved_piece_index: int
     ) -> bool:
+        # Multiple pieces are allowed to share the end_square (finished pieces
+        # simply pile up off the board), so never treat it as blocked.
+        if destination == self.end_square:
+            return False
         for index, position in enumerate(pieces):
             if index == moved_piece_index:
                 continue
@@ -278,6 +305,7 @@ class RoyalGameOfUrEnv(Env[dict[str, np.ndarray], Move]):
         return False
 
     def _is_occupied_by_opponent(self, destination: Position, opponent: np.ndarray) -> bool:
+        # The end square allows multiple pieces; rosette squares are safe zones
         if destination == self.end_square:
             return False
         if destination in self.config.rosette_positions:
