@@ -1,3 +1,10 @@
+"""Gymnasium environment for the Royal Game of Ur.
+
+Typical usage is through the CLI demo/training commands:
+    uv run python -m royal_game_of_ur --demo
+    uv run python -m royal_game_of_ur --episodes 1000 --output-dir artifacts
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

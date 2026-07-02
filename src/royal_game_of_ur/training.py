@@ -1,3 +1,12 @@
+"""Training utilities for SARSA(lambda).
+
+This module is called by the main CLI. Run training via:
+    uv run python -m royal_game_of_ur --episodes 1000 --output-dir artifacts
+
+Run analysis (which reuses training internally) via:
+    uv run python -m royal_game_of_ur --analyse --episodes 100000 --output-dir artifacts/Run_3
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,20 +55,7 @@ def train_sarsa_lambda(
     s' is the terminal winning state for player 1, and 0 otherwise.
     Only win (+1) is observed; loss is absorbing with reward 0, so the
     agent learns to maximise win probability.
-
-    Key corrections vs the original implementation
-    -----------------------------------------------
-    1.  Eligibility trace order: traces are incremented *before* the Q-update
-        loop, so the current (s, a) pair is updated with its full (accumulated)
-        trace value, not a pre-decayed one.
-    2.  Replacing traces (clips at 1) instead of accumulating traces that grow
-        without bound. This stabilises learning, especially with γλ near 1.
-    3.  Near-zero traces are pruned each step to keep the dict bounded.
-    4.  Legal actions for the next state are fetched from info["legal_actions"]
-        (already computed by the env) instead of re-querying env.legal_actions,
-        which avoids any ambiguity about which state the env is in.
-    5.  The epsilon-greedy selector receives an explicit list of legal actions
-        so it never proposes an illegal move as the greedy choice.
+    
     """
     rng = np.random.default_rng(seed)
     q_table: QTable = {}
