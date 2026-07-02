@@ -1,20 +1,25 @@
 """
+Analysis plotting module.
+
 Run with:
-    python -m ur.analysis                        # 100 000 episodes, saves to artifacts/
-    python -m ur.analysis --episodes 50000       # faster run for testing
-    python -m ur.analysis --skip-alpha-sweep     # skip the α sweep
+    uv run python -m royal_game_of_ur --analyse --episodes 100000 --output-dir artifacts/Run_3
+    uv run python -m royal_game_of_ur --analyse --episodes 100000 --output-dir artifacts/Run_3 --parallel-sweeps
+
+Direct module run (same plots):
+    uv run python -m royal_game_of_ur.analysis --episodes 100000 --output-dir artifacts/Run_3
 """
 from __future__ import annotations
  
 import argparse
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
  
 import matplotlib.pyplot as plt
 import numpy as np
  
 from .environment import RoyalGameOfUrEnv
 from .training import (
-    _initial_state_action_keys,
+    TrainingResult,
     train_sarsa_lambda,
 )
  
@@ -28,8 +33,7 @@ def _rolling_mean(values: list[float] | list[int] | np.ndarray, window: int) -> 
  
     For the first `window-1` points the average expands from the start,
     so the output has the same length as the input and is never distorted
-    by zero-padding.  (np.convolve mode='same' introduces visible dips at
-    both ends of the trace — this avoids that.)
+    by zero-padding.
     """
     arr = np.asarray(values, dtype=float)
     cumsum = np.concatenate([[0.0], np.cumsum(arr)])
@@ -43,14 +47,6 @@ def _cumulative_win_rate(wins: list[int]) -> np.ndarray:
     return np.cumsum(arr) / np.arange(1, len(arr) + 1)
  
  
-def _dice3_pair(env: RoyalGameOfUrEnv) -> tuple:
-    """(state_key, action_key) for the dice=3 initial state.
-    Dice=3 is the single most probable non-zero outcome (P=6/16 ≈ 0.375),
-    so its Q-value converges fastest and is the most representative to track.
-    """
-    return _initial_state_action_keys(env)[3]
- 
- 
 # ---------------------------------------------------------------------------
 # Plot 1 — Q-values for all 5 initial pairs (single baseline run)
 # ---------------------------------------------------------------------------
@@ -61,12 +57,14 @@ def plot_all_initial_q(
     alpha: float = 0.1,
     lambda_: float = 0.8,
     seed: int = 0,
+    result: TrainingResult | None = None,
 ) -> None:
-    """Show raw + smoothed Q_t(s0,a0) for every dice value on one figure."""
-    print(f"  [1/5] All-initial-Q run  α={alpha}, λ={lambda_} …", flush=True)
-    env = RoyalGameOfUrEnv()
-    result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
-                                lambda_=lambda_, seed=seed)
+    """Show unsmoothed + smoothed Q_t(s0,a0) for every dice value on one figure."""
+    print(f"  [1/5] All-initial-Q plot  α={alpha}, λ={lambda_} …", flush=True)
+    if result is None:
+        env = RoyalGameOfUrEnv()
+        result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
+                                    lambda_=lambda_, seed=seed)
  
     t = np.arange(1, episodes + 1)
     w = max(1, episodes // 200)           # ~0.5 % smoothing window
@@ -84,7 +82,7 @@ def plot_all_initial_q(
         axes[0].plot(t, values, linewidth=0.8, alpha=0.6, label=lbl)
         axes[1].plot(t, _rolling_mean(values, w), linewidth=1.6, label=lbl)
  
-    for ax, title in zip(axes, ["Raw", f"Smoothed (window={w})"]):
+    for ax, title in zip(axes, ["Unsmoothed", f"Smoothed (window={w})"]):
         ax.set_xlabel("Episode $t$")
         ax.set_ylabel(r"$Q_t(s_0, a_0)$")
         ax.set_ylim(-0.05, 1.05)
@@ -108,12 +106,14 @@ def plot_win_rate_baseline(
     alpha: float = 0.1,
     lambda_: float = 0.8,
     seed: int = 0,
+    result: TrainingResult | None = None,
 ) -> None:
     """Cumulative and smoothed win rate for the default hyperparameters."""
-    print(f"  [2/5] Win-rate baseline  α={alpha}, λ={lambda_} …", flush=True)
-    env = RoyalGameOfUrEnv()
-    result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
-                                lambda_=lambda_, seed=seed)
+    print(f"  [2/5] Win-rate baseline plot  α={alpha}, λ={lambda_} …", flush=True)
+    if result is None:
+        env = RoyalGameOfUrEnv()
+        result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
+                                    lambda_=lambda_, seed=seed)
  
     t = np.arange(1, episodes + 1)
     w = max(1, episodes // 200)
@@ -126,7 +126,13 @@ def plot_win_rate_baseline(
     )
  
     # Cumulative
-    axes[0].plot(t, _cumulative_win_rate(result.wins), linewidth=2, color="tab:blue")
+    axes[0].plot(
+        t,
+        _cumulative_win_rate(result.wins),
+        linewidth=2,
+        color="tab:blue",
+        label="Cumulative win rate",
+    )
     axes[0].axhline(0.5, color="grey", linestyle="--", linewidth=1.2,
                     label="50 % reference")
     axes[0].set_title("Cumulative win rate")
@@ -194,16 +200,14 @@ def plot_lambda_sweep(
         ax_q_smo.plot(t, q_smo, linewidth=1.6, label=lbl)
         ax_wr.plot(t, wr, linewidth=1.6, label=lbl)
  
-        # Peak Q-value reached across the whole run (smoothed to reduce noise)
-        final_q.append(float(np.max(_rolling_mean(q_raw, w))))
-        # Tail mean of last 10 % for win rate (win rate is computed every episode
-        # so the tail mean is a fair measure of converged policy performance)
+        # Tail mean of last 10 % for Q and win rate as a converged-value summary.
         tail = max(1, episodes // 10)
+        final_q.append(float(np.mean(q_raw[-tail:])))
         final_wr.append(float(np.mean(result.wins[-tail:])))
  
     # --- Figure A: raw Q traces ---
     ax_q_raw.set_title(
-        r"Raw $Q_t(s_0, a_0)$ for different $\lambda$  (dice=3 initial state)",
+        r"$Q_t(s_0, a_0)$ for different $\lambda$  (dice=3 initial state)",
         fontsize=11,
     )
     ax_q_raw.set_xlabel("Episode $t$")
@@ -254,15 +258,15 @@ def plot_lambda_sweep(
  
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(
-        r"Peak smoothed $Q(s_0, a_0)$ and converged win rate vs $\lambda$",
+        r"Converged values (tail mean of last 10 % of episodes) vs $\lambda$",
         fontsize=12,
     )
  
     axes[0].bar(x, final_q, width=w_bar, color="steelblue", edgecolor="white")
     axes[0].set_xticks(x); axes[0].set_xticklabels(lam_labels)
     axes[0].set_xlabel(r"$\lambda$")
-    axes[0].set_ylabel(r"Peak $Q$ (smoothed max)")
-    axes[0].set_title(r"Peak $Q(s_0, a_0)$ by $\lambda$")
+    axes[0].set_ylabel(r"$Q$ (tail mean, last 10 %)")
+    axes[0].set_title(r"Final $Q(s_0, a_0)$ by $\lambda$")
     axes[0].set_ylim(0.0, 1.0)
  
     axes[1].bar(x, final_wr, width=w_bar, color="darkorange", edgecolor="white")
@@ -317,8 +321,8 @@ def plot_alpha_sweep(
         ax_q_smo.plot(t, q_smo, linewidth=1.6, label=lbl)
         ax_wr.plot(t, wr, linewidth=1.6, label=lbl)
  
-        final_q.append(float(np.max(_rolling_mean(q_raw, w))))
         tail = max(1, episodes // 10)
+        final_q.append(float(np.mean(q_raw[-tail:])))
         final_wr.append(float(np.mean(result.wins[-tail:])))
  
     # --- Figure A: smoothed Q convergence ---
@@ -359,7 +363,7 @@ def plot_alpha_sweep(
  
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(
-        r"Converged values (tail mean of last 5 % of episodes) vs $\alpha$"
+        r"Converged values (tail mean of last 10 % of episodes) vs $\alpha$"
         f"  (λ={lambda_})",
         fontsize=12,
     )
@@ -367,7 +371,7 @@ def plot_alpha_sweep(
     axes[0].bar(x, final_q, width=w_bar, color="steelblue", edgecolor="white")
     axes[0].set_xticks(x); axes[0].set_xticklabels(alpha_labels)
     axes[0].set_xlabel(r"$\alpha$")
-    axes[0].set_ylabel(r"$\overline{Q}$ (tail mean)")
+    axes[0].set_ylabel(r"$Q$ (tail mean, last 10 %)")
     axes[0].set_title(r"Final $Q(s_0, a_0)$ by $\alpha$")
     axes[0].set_ylim(0.0, 1.0)
  
@@ -375,12 +379,82 @@ def plot_alpha_sweep(
     axes[1].axhline(0.5, color="grey", linestyle="--", linewidth=1.0)
     axes[1].set_xticks(x); axes[1].set_xticklabels(alpha_labels)
     axes[1].set_xlabel(r"$\alpha$")
-    axes[1].set_ylabel("Win rate (tail mean)")
+    axes[1].set_ylabel("Win rate (tail mean, last 10 %)")
     axes[1].set_title(r"Final win rate by $\alpha$")
     axes[1].set_ylim(0.0, 1.0)
  
     fig.tight_layout()
     p = output_dir / "alpha_final_values.png"
+    fig.savefig(p, dpi=200); plt.close(fig)
+    print(f"    → {p}")
+
+
+# ---------------------------------------------------------------------------
+# Plot 6 — Episode sweep: converged-value summary vs episode count
+# ---------------------------------------------------------------------------
+
+def plot_episode_sweep(
+    output_dir: Path,
+    episode_counts: tuple[int, ...],
+    alpha: float = 0.1,
+    lambda_: float = 0.8,
+    seed: int = 0,
+) -> None:
+    """Summarise converged Q and win rate vs episode count."""
+    counts = tuple(int(e) for e in episode_counts if int(e) > 0)
+    if not counts:
+        return
+
+    print(f"  [6/6] Episode sweep  ({len(counts)} episode counts)", flush=True)
+    plt.style.use("ggplot")
+
+    final_q: list[float] = []
+    final_wr: list[float] = []
+
+    for ep in counts:
+        print(f"    episodes={ep:,} …", flush=True)
+        env = RoyalGameOfUrEnv()
+        result = train_sarsa_lambda(
+            env,
+            episodes=ep,
+            alpha=alpha,
+            lambda_=lambda_,
+            seed=seed,
+        )
+
+        q_raw = np.asarray(result.tracked_initial_values[3])
+        tail = max(1, ep // 10)
+        final_q.append(float(np.mean(q_raw[-tail:])))
+        final_wr.append(float(np.mean(result.wins[-tail:])))
+
+    labels = [f"{e:,}" for e in counts]
+    x = np.arange(len(counts))
+    w_bar = 0.38
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(
+        r"Converged values (tail mean of last 10 % of episodes) vs episode count"
+        f"  (α={alpha}, λ={lambda_})",
+        fontsize=12,
+    )
+
+    axes[0].bar(x, final_q, width=w_bar, color="steelblue", edgecolor="white")
+    axes[0].set_xticks(x); axes[0].set_xticklabels(labels)
+    axes[0].set_xlabel("Episodes")
+    axes[0].set_ylabel(r"$Q$ (tail mean, last 10 %)")
+    axes[0].set_title(r"Final $Q(s_0, a_0)$ by episode count")
+    axes[0].set_ylim(0.0, 1.0)
+
+    axes[1].bar(x, final_wr, width=w_bar, color="darkorange", edgecolor="white")
+    axes[1].axhline(0.5, color="grey", linestyle="--", linewidth=1.0)
+    axes[1].set_xticks(x); axes[1].set_xticklabels(labels)
+    axes[1].set_xlabel("Episodes")
+    axes[1].set_ylabel("Win rate (tail mean, last 10 %)")
+    axes[1].set_title("Final win rate by episode count")
+    axes[1].set_ylim(0.0, 1.0)
+
+    fig.tight_layout()
+    p = output_dir / "episode_final_values.png"
     fig.savefig(p, dpi=200); plt.close(fig)
     print(f"    → {p}")
  
@@ -395,15 +469,17 @@ def plot_dice_comparison(
     alpha: float = 0.1,
     lambda_: float = 0.8,
     seed: int = 0,
+    result: TrainingResult | None = None,
 ) -> None:
-    """Side-by-side: raw vs smoothed Q_t for every dice value.
+    """Side-by-side: unsmoothed vs smoothed Q_t for every dice value.
     This justifies the choice of dice=3 as the representative pair and shows
     that the dice=0 (pass) Q-value stays at 0 — a useful sanity check.
     """
     print(f"  [5/5] Dice comparison plot  α={alpha}, λ={lambda_} …", flush=True)
-    env = RoyalGameOfUrEnv()
-    result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
-                                lambda_=lambda_, seed=seed)
+    if result is None:
+        env = RoyalGameOfUrEnv()
+        result = train_sarsa_lambda(env, episodes=episodes, alpha=alpha,
+                                    lambda_=lambda_, seed=seed)
  
     t = np.arange(1, episodes + 1)
     w = max(1, episodes // 200)
@@ -411,7 +487,7 @@ def plot_dice_comparison(
  
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
     fig.suptitle(
-        r"$Q_t(s_0, a_0)$ per initial dice value  —  raw (left) and smoothed (right)"
+        r"$Q_t(s_0, a_0)$ per initial dice value  —  unsmoothed (left) and smoothed (right)"
         f"\n(α={alpha}, λ={lambda_})",
         fontsize=11,
     )
@@ -421,7 +497,7 @@ def plot_dice_comparison(
         axes[0].plot(t, values,                   linewidth=0.8, alpha=0.65, label=lbl)
         axes[1].plot(t, _rolling_mean(values, w), linewidth=1.6,             label=lbl)
  
-    for ax, title in zip(axes, ["Raw", f"Smoothed  (window={w})"]):
+    for ax, title in zip(axes, ["Unsmoothed", f"Smoothed  (window={w})"]):
         ax.set_xlabel("Episode $t$")
         ax.set_ylabel(r"$Q_t(s_0, a_0)$")
         ax.set_ylim(-0.05, 1.05)
@@ -447,22 +523,55 @@ def main() -> int:
     parser.add_argument("--seed",        type=int,   default=0)
     parser.add_argument("--skip-lambda-sweep", action="store_true")
     parser.add_argument("--skip-alpha-sweep",  action="store_true")
+    parser.add_argument("--skip-episode-sweep", action="store_true")
+    parser.add_argument(
+        "--parallel-sweeps",
+        action="store_true",
+        help="Run lambda and alpha sweeps in parallel when both are enabled.",
+    )
     args = parser.parse_args()
  
     out: Path = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     ep = args.episodes
  
-    plot_all_initial_q(ep, out, seed=args.seed)
-    plot_win_rate_baseline(ep, out, seed=args.seed)
+    print(f"=== Baseline training ({ep:,} episodes) ===")
+    baseline_env = RoyalGameOfUrEnv()
+    baseline_result = train_sarsa_lambda(
+        baseline_env,
+        episodes=ep,
+        seed=args.seed,
+    )
+
+    plot_all_initial_q(ep, out, seed=args.seed, result=baseline_result)
+    plot_win_rate_baseline(ep, out, seed=args.seed, result=baseline_result)
  
-    if not args.skip_lambda_sweep:
-        plot_lambda_sweep(ep, out, seed=args.seed)
+    run_lambda = not args.skip_lambda_sweep
+    run_alpha = not args.skip_alpha_sweep
+    run_episode = not args.skip_episode_sweep
+
+    episode_values = tuple(sorted({max(1_000, ep // 10), max(2_000, ep // 2), ep}))
+    if run_lambda and run_alpha and args.parallel_sweeps:
+        print("\n=== Running lambda/alpha sweeps in parallel ===")
+        with ProcessPoolExecutor(max_workers=2) as ex:
+            future_lambda = ex.submit(plot_lambda_sweep, ep, out, seed=args.seed)
+            future_alpha = ex.submit(plot_alpha_sweep, ep, out, seed=args.seed)
+            future_lambda.result()
+            future_alpha.result()
+    else:
+        if run_lambda:
+            plot_lambda_sweep(ep, out, seed=args.seed)
+        if run_alpha:
+            plot_alpha_sweep(ep, out, seed=args.seed)
+
+    if run_episode:
+        plot_episode_sweep(
+            out,
+            episode_values,
+            seed=args.seed,
+        )
  
-    if not args.skip_alpha_sweep:
-        plot_alpha_sweep(ep, out, seed=args.seed)
- 
-    plot_dice_comparison(ep, out, seed=args.seed)
+    plot_dice_comparison(ep, out, seed=args.seed, result=baseline_result)
  
     print(f"\nDone — all figures saved to {out}")
     return 0
